@@ -8,18 +8,7 @@ import os
 app = Flask(__name__)
 # Get frontend URL from environment or default to localhost
 frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-origins = [frontend_url]
-if os.getenv("FLASK_ENV") == "development":
-    origins.extend(["http://127.0.0.1:3000", "http://localhost:3000"])
-
-CORS(app, resources={
-    r"/*": {
-        "origins": origins,
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": True
-    }
-})
+CORS(app)
 load_dotenv()
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DB", "sqlite:///database.db")
 app.config['SECRET_KEY'] = os.getenv('SECRET', "testkey")
