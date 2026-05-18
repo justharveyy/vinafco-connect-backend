@@ -39,9 +39,11 @@ from app.routes.me import me_bp
 from app.routes.vessels import vessel_bp
 from app.routes.booking import booking_bp
 from app.routes.ai_agent import ai_bp
+from app.routes.admin import admin_bp
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(me_bp)
 app.register_blueprint(vessel_bp)
 app.register_blueprint(booking_bp)
 app.register_blueprint(ai_bp)
+app.register_blueprint(admin_bp)
