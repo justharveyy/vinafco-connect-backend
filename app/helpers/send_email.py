@@ -27,7 +27,7 @@ def send_verification_email(to_email, fullname, verification_link):
     try:
         with smtplib.SMTP(os.getenv("EMAIL_HOST"), os.getenv("EMAIL_PORT")) as server:
             server.starttls()
-            server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
+            server.login(os.getenv("EMAIL_USERNAME"), os.getenv("EMAIL_PASSWORD"))
             message = f"Subject: {subject}\nContent-Type: text/html\n\n{html_body}"
             server.sendmail(os.getenv("EMAIL_ADDRESS"), to_email, message)
             return True
