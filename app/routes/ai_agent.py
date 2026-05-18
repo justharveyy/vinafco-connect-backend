@@ -11,7 +11,7 @@ import hashlib
 from datetime import datetime, timedelta
 
 from app.decorators.token_required import token_required
-from app.models import db, Vessels, Routes, Bookings, Items, Confirmations, Users, UpcomingAvailability
+from app.models import db, Vessels, Routes, Bookings, Items, Confirmations, Users, UpcomingAvailability, Chats, ChatMessages
 from app.routes.booking import generate_booking_id, CARGO_TYPES, CARGO_MULTIPLER
 from app.helpers.generate_invoice import run as generate_invoice
 
@@ -308,6 +308,7 @@ def _split_route(route):
 def check_availability(vessel_code=None, depart_from=None, min_weight=None):
     """Check upcoming sailing availability"""
     import time
+    from datetime import datetime
     now_ts = time.time()
     lead_ts = now_ts + (7 * 24 * 3600)
 
@@ -323,6 +324,12 @@ def check_availability(vessel_code=None, depart_from=None, min_weight=None):
 
     slots = query.order_by(UpcomingAvailability.departure_date_time).limit(10).all()
 
+    def format_timestamp(ts):
+        """Convert timestamp to readable date format"""
+        if isinstance(ts, (int, float)):
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+        return str(ts)
+
     return {
         "success": True,
         "slots": [
@@ -330,13 +337,13 @@ def check_availability(vessel_code=None, depart_from=None, min_weight=None):
                 "vessel_id": s.vessel_id,
                 "depart_from": s.depart_from,
                 "arrive_to": s.arrive_to,
-                "departure_date_time": s.departure_date_time,
-                "arrival_date_time": s.arrival_date_time,
+                "departure_date_time": format_timestamp(s.departure_date_time),
+                "arrival_date_time": format_timestamp(s.arrival_date_time),
                 "available_weight_kg": s.available_weight,
                 "remaining_weight_kg": s.remaining_weight,
             }
             for s in slots
-        ]
+        ],
     }
 
 
@@ -515,9 +522,7 @@ def create_booking_for_user(user_id, vessel_code, route, cargo_type, items):
     confirmation_id = str(uuid.uuid4())
     confirmation_key = uuid.uuid4().hex
     original_hash = result["original_hash"]
-    signed_hash = hashlib.sha256(
-        f"{original_hash}{confirmation_key}".encode()
-    ).hexdigest()
+    signed_hash = ""
 
     conf = Confirmations()
     conf.booking_id = booking.booking_id
@@ -547,9 +552,9 @@ def create_booking_for_user(user_id, vessel_code, route, cargo_type, items):
                 "base_price": round(base_price * total_weight, 2),
                 "extra_fees": round(extra_fee, 2),
                 "status": "Requested",
-                "estimated_departure": booking.estimated_start_time.isoformat(),
-                "estimated_arrival": booking.estimated_time_to_destination.isoformat(),
-                "expires_at": booking.expire_in.isoformat(),
+                "estimated_departure": booking.estimated_start_time.strftime("%Y-%m-%d %H:%M"),
+                "estimated_arrival": booking.estimated_time_to_destination.strftime("%Y-%m-%d %H:%M"),
+                "expires_at": booking.expire_in.strftime("%Y-%m-%d %H:%M"),
                 "confirmation_id": confirmation_id,
                 "pdf_url": result.get("presigned_url"),
                 "items_count": len(items),
@@ -560,7 +565,75 @@ def create_booking_for_user(user_id, vessel_code, route, cargo_type, items):
         return {"success": False, "message": f"Database error: {str(e)}"}
 
 
-def execute_function(function_name, arguments, user=None):
+def generate_chat_title(first_message):
+    """Generate a meaningful chat title based on the first user message"""
+    try:
+        # Use OpenAI to generate a concise title
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Generate a concise, descriptive title (max 5 words) for a shipping/logistics conversation. The title should reflect the main topic. Examples: 'Vessel Availability Check', 'Shipping Quote Request', 'Route Information', 'Booking Process Help'"
+                },
+                {
+                    "role": "user",
+                    "content": f"Generate a title for this message: '{first_message}'"
+                }
+            ],
+            max_tokens=20,
+            temperature=0.7
+        )
+        
+        title = response.choices[0].message.content.strip()
+        # Clean up the title and ensure it's not too long
+        title = title.strip('"').strip("'")
+        if len(title) > 50:
+            title = title[:47] + "..."
+        
+        return title if title else f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    except Exception as e:
+        logger.error(f"Error generating chat title: {str(e)}")
+        return f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+
+def get_or_create_chat(user_id, chat_title=None, first_message=None):
+    """Get existing chat or create new one"""
+    if chat_title:
+        chat = Chats.query.filter_by(user_id=user_id, chat_title=chat_title).first()
+        if chat:
+            return chat
+    
+    # Generate title if this is a new chat with a first message
+    if not chat_title and first_message:
+        chat_title = generate_chat_title(first_message)
+    
+    # Create new chat
+    chat = Chats()
+    chat.user_id = user_id
+    chat.chat_id = str(uuid.uuid4())
+    chat.chat_title = chat_title or f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    
+    db.session.add(chat)
+    db.session.commit()
+    return chat
+
+
+def store_chat_message(chat_id, sender, message):
+    """Store a chat message"""
+    logger.info(f"[AI Store Message] Storing {sender} message for chat {chat_id}: {message[:100]}...")
+    chat_message = ChatMessages()
+    chat_message.chat_id = chat_id
+    chat_message.sender = sender
+    chat_message.message = message
+    
+    db.session.add(chat_message)
+    db.session.commit()
+    logger.info(f"[AI Store Message] Successfully stored message with ID: {chat_message.id}")
+    return chat_message
+
+
+def execute_function(function_name, arguments, user_id=None):
     """Execute the appropriate function based on name and arguments"""
     if function_name == "list_vessels":
         return list_vessels()
@@ -582,10 +655,10 @@ def execute_function(function_name, arguments, user=None):
             min_weight=arguments.get("min_weight")
         )
     elif function_name == "create_booking":
-        if user is None:
+        if user_id is None:
             return {"success": False, "message": "create_booking requires user context"}
         return create_booking_for_user(
-            user.user_id,
+            user_id,
             arguments.get("vessel_code"),
             arguments.get("route"),
             arguments.get("cargo_type"),
@@ -608,6 +681,30 @@ def chat(user):
         logger.warning("[AI Chat] Missing messages in request")
         return jsonify({"success": False, "message": "Messages required"}), 400
     
+    chat_id = data.get("chat_id")
+    chat_title = data.get("chat_title")
+    
+    # Extract first user message for title generation if this is a new chat
+    first_user_message = None
+    if not chat_id and data.get("messages"):
+        user_messages = [msg for msg in data["messages"] if msg["role"] == "user"]
+        if user_messages:
+            first_user_message = user_messages[0]["content"]
+    
+    # Get or create chat session
+    if chat_id:
+        chat = Chats.query.filter_by(chat_id=chat_id, user_id=user.user_id).first()
+        if not chat:
+            return jsonify({"success": False, "message": "Chat session not found"}), 404
+    else:
+        chat = get_or_create_chat(user.user_id, chat_title, first_user_message)
+        chat_id = chat.chat_id
+    
+    # Store user messages
+    for message in data["messages"]:
+        if message["role"] == "user":
+            store_chat_message(chat_id, "user", message["content"])
+    
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(data["messages"])
     
@@ -621,6 +718,11 @@ def chat(user):
         )
         
         assistant_message = response.choices[0].message
+        
+        # Store assistant response
+        assistant_content = assistant_message.content or ""
+        if assistant_content:
+            store_chat_message(chat_id, "assistant", assistant_content)
         
         # Check if tool calls are needed
         if assistant_message.tool_calls:
@@ -645,7 +747,7 @@ def chat(user):
             for tool_call in assistant_message.tool_calls:
                 function_name = tool_call.function.name
                 arguments = json.loads(tool_call.function.arguments)
-                result = execute_function(function_name, arguments, user=user)
+                result = execute_function(function_name, arguments, user_id=user.user_id)
                 
                 # Add tool result to messages
                 messages.append({
@@ -661,15 +763,21 @@ def chat(user):
                 max_tokens=2000
             )
             
+            # Store final response
+            if final_response.choices[0].message.content:
+                store_chat_message(chat_id, "assistant", final_response.choices[0].message.content)
+            
             return jsonify({
                 "success": True,
                 "response": final_response.choices[0].message.content,
+                "chat_id": chat_id,
                 "tool_calls_executed": len(assistant_message.tool_calls)
             })
         
         return jsonify({
             "success": True,
-            "response": assistant_message.content
+            "response": assistant_message.content,
+            "chat_id": chat_id
         })
         
     except Exception as e:
@@ -696,9 +804,35 @@ def chat_stream(user):
         logger.warning("[AI Stream] Missing messages in request")
         return jsonify({"success": False, "message": "Messages required"}), 400
     
+    chat_id = data.get("chat_id")
+    chat_title = data.get("chat_title")
+    
+    # Extract first user message for title generation if this is a new chat
+    first_user_message = None
+    if not chat_id and data.get("messages"):
+        user_messages = [msg for msg in data["messages"] if msg["role"] == "user"]
+        if user_messages:
+            first_user_message = user_messages[0]["content"]
+    
+    # Get or create chat session
+    if chat_id:
+        chat = Chats.query.filter_by(chat_id=chat_id, user_id=user.user_id).first()
+        if not chat:
+            return jsonify({"success": False, "message": "Chat session not found"}), 404
+    else:
+        chat = get_or_create_chat(user.user_id, chat_title, first_user_message)
+        chat_id = chat.chat_id
+    
+    # Store user messages
+    for message in data["messages"]:
+        if message["role"] == "user":
+            store_chat_message(chat_id, "user", message["content"])
+    
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(data["messages"])
     logger.debug(f"[AI Stream] Total messages: {len(messages)}")
+    
+    current_user_id = user.user_id
     
     def generate():
         try:
@@ -749,6 +883,10 @@ def chat_stream(user):
                 logger.info("[AI Stream] Executing tool calls")
                 yield f"data: {json.dumps({'type': 'status', 'content': 'Processing your request...'})}\n\n"
                 
+                # Store the initial assistant response (before tool calls)
+                if content_buffer:
+                    store_chat_message(chat_id, "assistant", content_buffer)
+                
                 # Add assistant message with tool calls
                 messages.append({
                     "role": "assistant",
@@ -766,7 +904,7 @@ def chat_stream(user):
                     
                     logger.info(f"[AI Stream] Executing function: {function_name} with args: {arguments}")
                     
-                    result = execute_function(function_name, arguments, user=user)
+                    result = execute_function(function_name, arguments, user_id=current_user_id)
                     
                     logger.debug(f"[AI Stream] Function {function_name} result: {result}")
                     
@@ -788,9 +926,20 @@ def chat_stream(user):
                     stream=True
                 )
                 
+                final_content = ""
                 for chunk in final_response:
                     if chunk.choices[0].delta.content:
-                        yield f"data: {json.dumps({'type': 'content', 'content': chunk.choices[0].delta.content})}\n\n"
+                        content = chunk.choices[0].delta.content
+                        final_content += content
+                        yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+                
+                # Store the complete assistant response
+                if final_content:
+                    store_chat_message(chat_id, "assistant", final_content)
+            else:
+                # No tool calls - just store the content buffer as the assistant response
+                if content_buffer:
+                    store_chat_message(chat_id, "assistant", content_buffer)
             
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             
@@ -808,3 +957,107 @@ def chat_stream(user):
             'X-Accel-Buffering': 'no'
         }
     )
+
+
+@ai_bp.route("/chats", methods=["GET"])
+@token_required()
+def get_user_chats(user):
+    """Get all chat sessions for a user"""
+    try:
+        chats = Chats.query.filter_by(user_id=user.user_id).order_by(Chats.id.desc()).all()
+        
+        chat_list = []
+        for chat in chats:
+            # Get the last message for preview
+            last_message = ChatMessages.query.filter_by(chat_id=chat.chat_id).order_by(ChatMessages.timestamp.desc()).first()
+            
+            chat_list.append({
+                "chat_id": chat.chat_id,
+                "chat_title": chat.chat_title,
+                "last_message": last_message.message if last_message else None,
+                "last_message_time": last_message.timestamp.isoformat() if last_message else None,
+                "message_count": ChatMessages.query.filter_by(chat_id=chat.chat_id).count()
+            })
+        
+        return jsonify({
+            "success": True,
+            "chats": chat_list
+        })
+        
+    except Exception as e:
+        logger.exception(f"[AI Chats] Error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+
+@ai_bp.route("/chats/<chat_id>", methods=["GET"])
+@token_required()
+def get_chat_messages(user, chat_id):
+    """Get all messages for a specific chat"""
+    try:
+        # Verify chat belongs to user
+        chat = Chats.query.filter_by(chat_id=chat_id, user_id=user.user_id).first()
+        if not chat:
+            return jsonify({"success": False, "message": "Chat not found"}), 404
+        
+        messages = ChatMessages.query.filter_by(chat_id=chat_id).order_by(ChatMessages.timestamp.asc()).all()
+        
+        logger.info(f"[AI Chat Messages] Found {len(messages)} messages for chat {chat_id}")
+        
+        message_list = []
+        for msg in messages:
+            logger.info(f"[AI Chat Messages] Message: {msg.sender} - {msg.message[:50]}...")
+            message_list.append({
+                "id": msg.id,
+                "sender": msg.sender,
+                "message": msg.message,
+                "timestamp": msg.timestamp.isoformat()
+            })
+        
+        logger.info(f"[AI Chat Messages] Returning {len(message_list)} messages")
+        return jsonify({
+            "success": True,
+            "chat_id": chat_id,
+            "chat_title": chat.chat_title,
+            "messages": message_list
+        })
+        
+    except Exception as e:
+        logger.exception(f"[AI Chat Messages] Error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+
+@ai_bp.route("/chats/<chat_id>", methods=["DELETE"])
+@token_required()
+def delete_chat(user, chat_id):
+    """Delete a chat session and all its messages"""
+    try:
+        # Verify chat belongs to user
+        chat = Chats.query.filter_by(chat_id=chat_id, user_id=user.user_id).first()
+        if not chat:
+            return jsonify({"success": False, "message": "Chat not found"}), 404
+        
+        # Delete all messages first
+        ChatMessages.query.filter_by(chat_id=chat_id).delete()
+        
+        # Delete the chat
+        db.session.delete(chat)
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": "Chat deleted successfully"
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        logger.exception(f"[AI Delete Chat] Error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500

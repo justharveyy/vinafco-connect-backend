@@ -486,6 +486,26 @@ def upload_pdf(pdf_bytes: bytes, booking_ref: str) -> dict:
     }
 
 
+def get_pdf_url(booking_ref: str) -> str:
+    """Retrieve the presigned URL for an existing booking PDF."""
+    s3 = get_s3_client()
+    prefix = f"contracts/{booking_ref}/"
+    try:
+        response = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=prefix)
+        if "Contents" in response and len(response["Contents"]) > 0:
+            # Get the most recent one if multiple exist
+            sorted_contents = sorted(response["Contents"], key=lambda x: x["LastModified"], reverse=True)
+            s3_key = sorted_contents[0]["Key"]
+            return s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": BUCKET_NAME, "Key": s3_key},
+                ExpiresIn=PRESIGN_EXPIRY,
+            )
+    except Exception as e:
+        print(f"Error fetching PDF URL for {booking_ref}: {str(e)}")
+    return None
+
+
 def run(booking: dict = BOOKING) -> dict:
     print("Generating PDF...")
     pdf_bytes = generate_pdf(booking)

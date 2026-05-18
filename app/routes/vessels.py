@@ -61,7 +61,6 @@ def get_vessel(user, vessel_code):
             "reported_eta": vessel.reported_eta.isoformat(),
             "matched_destination": vessel.matched_destination,
             "vessel_type": vessel.vessel_type,
-            "last_updated": vessel.last_updated.isoformat(),
-            "quote": vessel.quote
+            "last_updated": vessel.last_updated.isoformat()
         }
     }), 200

@@ -1,4 +1,4 @@
-# This code is written by human
+# This code is written by a human
 
 from flask import Blueprint, request, jsonify
 
@@ -14,7 +14,7 @@ from app.models import (
     Confirmations,
 )
 from app.decorators.token_required import token_required
-from app.helpers.generate_invoice import run
+from app.helpers.generate_invoice import run, get_pdf_url
 
 import requests
 import random
@@ -313,9 +313,7 @@ def create_booking(user):
     confirmation_id = str(uuid.uuid4())
     confirmation_key = uuid.uuid4().hex
     original_hash = result["original_hash"]
-    signed_hash = hashlib.sha256(
-        f"{original_hash}{confirmation_key}".encode()
-    ).hexdigest()
+    signed_hash = ""
 
     conf = Confirmations()
     conf.booking_id = booking.booking_id
@@ -354,3 +352,112 @@ def create_booking(user):
         ),
         201,
     )
+
+@booking_bp.route("/unsigned-confirmations", methods=["GET"])
+@token_required()
+def unsigned_confirmations(user):
+    bookings = Bookings.query.filter_by(user_id=user.user_id).all()
+    booking_ids = [b.booking_id for b in bookings]
+    
+    if not booking_ids:
+        return jsonify({"success": True, "data": []})
+        
+    unsigned_confs = Confirmations.query.filter(
+        Confirmations.booking_id.in_(booking_ids),
+        Confirmations.signed_hash == ""
+    ).all()
+    
+    data = []
+    for conf in unsigned_confs:
+        booking = next((b for b in bookings if b.booking_id == conf.booking_id), None)
+        data.append({
+            "confirmation_id": conf.confirmation_id,
+            "booking_id": conf.booking_id,
+            "created_at": conf.created_at.isoformat() if conf.created_at else None,
+            "original_hash": conf.original_hash,
+            "total_price": booking.total_price if booking else 0,
+            "extra_fees": booking.extra_fees if booking else 0,
+            "base_price": (booking.total_price - booking.extra_fees) if booking else 0,
+            "cargo_type": booking.cargo_type if booking else "",
+            "items": [{"name": i.name, "weight": i.weight, "price": i.price, "description": i.description} for i in Items.query.filter_by(booking_id=conf.booking_id).all()]
+        })
+        
+    return jsonify({"success": True, "data": data})
+
+@booking_bp.route("/signed-confirmations", methods=["GET"])
+@token_required()
+def signed_confirmations(user):
+    bookings = Bookings.query.filter_by(user_id=user.user_id).all()
+    booking_ids = [b.booking_id for b in bookings]
+    
+    if not booking_ids:
+        return jsonify({"success": True, "data": []})
+        
+    signed_confs = Confirmations.query.filter(
+        Confirmations.booking_id.in_(booking_ids),
+        Confirmations.signed_hash != ""
+    ).all()
+    
+    data = []
+    for conf in signed_confs:
+        booking = next((b for b in bookings if b.booking_id == conf.booking_id), None)
+        pdf_url = get_pdf_url(conf.booking_id)
+        data.append({
+            "confirmation_id": conf.confirmation_id,
+            "booking_id": conf.booking_id,
+            "created_at": conf.created_at.isoformat() if conf.created_at else None,
+            "original_hash": conf.original_hash,
+            "signed_hash": conf.signed_hash,
+            "total_price": booking.total_price if booking else 0,
+            "extra_fees": booking.extra_fees if booking else 0,
+            "base_price": (booking.total_price - booking.extra_fees) if booking else 0,
+            "cargo_type": booking.cargo_type if booking else "",
+            "items": [{"name": i.name, "weight": i.weight, "price": i.price, "description": i.description} for i in Items.query.filter_by(booking_id=conf.booking_id).all()],
+            "pdf_url": pdf_url
+        })
+        
+    return jsonify({"success": True, "data": data})
+
+@booking_bp.route("/sign-confirmation", methods=["POST"])
+@token_required()
+def sign_confirmation(user):
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"success": False, "message": "Invalid payload"}), 400
+        
+    confirmation_id = payload.get("confirmation_id")
+    password = payload.get("password")
+    
+    if not confirmation_id or not password:
+        return jsonify({"success": False, "message": "Confirmation ID and password are required"}), 400
+        
+    from hashlib import sha256
+    if user.password != sha256(f"{app.config['SECRET_KEY']}{password}".encode()).hexdigest():
+        return jsonify({"success": False, "message": "Incorrect password"}), 401
+        
+    conf = Confirmations.query.filter_by(confirmation_id=confirmation_id).first()
+    if not conf:
+        return jsonify({"success": False, "message": "Confirmation not found"}), 404
+        
+    booking = Bookings.query.filter_by(booking_id=conf.booking_id).first()
+    if not booking or booking.user_id != user.user_id:
+        return jsonify({"success": False, "message": "Unauthorized"}), 403
+        
+    if conf.signed_hash != "":
+        return jsonify({"success": False, "message": "Already signed"}), 400
+        
+    conf.signed_hash = sha256(f"{conf.original_hash}{user.password}".encode()).hexdigest()
+    booking.status = "Processing"
+    
+    db.session.commit()
+    
+    pdf_url = get_pdf_url(conf.booking_id)
+    
+    return jsonify({
+        "success": True, 
+        "message": "Document successfully signed",
+        "data": {
+            "signed_hash": conf.signed_hash,
+            "pdf_url": pdf_url
+        }
+    })
